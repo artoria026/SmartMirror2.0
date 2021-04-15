@@ -1,39 +1,97 @@
-// Default Arduino includes
+// ============================================ //
+// ================= Includes ================= //
+// ============================================ //
+
+/**
+ * Includes for default arduino
+ * WiFi 
+ * Non_volatile storage
+ */
 #include <Arduino.h>
 #include <WiFi.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 
-// Includes for JSON object handling
-// Requires ArduinoJson library
-// https://arduinojson.org
-// https://github.com/bblanchon/ArduinoJson
+/**
+ * Includes for JSON object handling
+ * Requires ArduinoJson library
+ * https://arduinojson.org
+ * https://github.com/bblanchon/ArduinoJson
+ */
 #include <ArduinoJson.h>
 
-// Includes for Bluetooth Serial
+/** Includes for Bluetooth Serial */
 #include "BluetoothSerial.h"
+
+/** Includes persist after restart */
 #include <Preferences.h>
 
-/** Includes for ESP32 AI THINKER
- * 	disable brownout detector
+/** 
+ * Disable brownout detector
+ * ESP32 CAM include
 */
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include "esp_camera.h"
 
-// Server IP image target
-String serverName = "pinware.tech";
-// Backend file for img
-String serverPath = "/host_files-main/upload.php";
-// Server port
-const int serverPort = 80;
-// Device IP
-String deviceIpAdd = "";
+/** Include http requests */
+#include "HTTPClient.h"
 
-// WifiClient class
+// ============================================ //
+// ================= Variables ================ //
+// ============================================ //
+
+/** Build time */
+const char compileDate[] = __DATE__ " " __TIME__;
+
+/** Unique device name from MAC */
+char apName[] = "ESP32-xxxxxxxxxxxx";
+
+/** WifiClient class */
 WiFiClient client;
+/** HttpClient class */
+HTTPClient http;
+/** SerialBT class */
+BluetoothSerial SerialBT;
 
-// CAMERA_MODEL_AI_THINKER
+/** Buffer for JSON string */
+StaticJsonDocument<200> jsonBuffer;
+/** Create camera_config_t objet */
+camera_config_t config;
+
+/** SSIDs of local WiFi networks */
+String ssidPrim;
+String ssidSec;
+/** Password for local WiFi network */
+String pwPrim;
+String pwSec;
+
+/** 
+ * Selected network 
+  		true = use primary network
+  			false = use secondary network
+*/
+bool usePrimAP = true;
+/** Flag if stored AP credentials are available */
+bool hasCredentials = false;
+/** Connection status */
+volatile bool isConnected = false;
+/** Connection change status */
+bool connStatusChanged = false;
+
+/** Server domain */
+String serverName = "pinware.tech";
+/** Server path to img upload */
+String serverPath = "/host_files-main/upload.php";
+/** Server port */
+const int serverPort = 80;
+/** Device MAC name string */
+
+/** Global variables */
+String final_uid = "";
+String final_token = "";
+
+/** CAMERA_MODEL_AI_THINKER define pins */
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM 0
@@ -52,51 +110,19 @@ WiFiClient client;
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
-// camera_config_t class
-camera_config_t config;
+// ============================================ //
+// ============== Routine methods ============= //
+// ============================================ //
 
-const int timerInterval = 10000;  // time between each HTTP POST image
-unsigned long previousMillis = 0; // last time image was sent
-
-// Build time
-const char compileDate[] = __DATE__ " " __TIME__;
-
-// Unique device name
-char apName[] = "ESP32-xxxxxxxxxxxx";
-/** Selected network 
-    true = use primary network
-		false = use secondary network
-*/
-bool usePrimAP = true;
-// Flag if stored AP credentials are available
-bool hasCredentials = false;
-// Connection status
-volatile bool isConnected = false;
-// Connection change status
-bool connStatusChanged = false;
-
-//Create unique device name from MAC address
+/** Create unique device name from MAC address */
 void createName()
 {
 	uint8_t baseMac[6];
-	// Get MAC address for WiFi station
+	/** Get MAC address for WiFi station */
 	esp_read_mac(baseMac, ESP_MAC_WIFI_STA);
-	// Write unique name into apName
+	/** Write unique name into apName */
 	sprintf(apName, "ESP32-%02X%02X%02X%02X%02X%02X", baseMac[0], baseMac[1], baseMac[2], baseMac[3], baseMac[4], baseMac[5]);
 }
-
-// SSIDs of local WiFi networks
-String ssidPrim;
-String ssidSec;
-// Password for local WiFi network
-String pwPrim;
-String pwSec;
-
-// SerialBT class
-BluetoothSerial SerialBT;
-
-// Buffer for JSON string
-StaticJsonDocument<200> jsonBuffer;
 
 /**
  * initBTSerial
@@ -113,7 +139,7 @@ bool initBTSerial()
 		Serial.println("Failed to start BTSerial");
 		return false;
 	}
-	Serial.println("BTSerial active. Device name: " + String(apName));
+	Serial.println("BTSerial active, device name: " + String(apName));
 	return true;
 }
 
@@ -127,19 +153,19 @@ void readBTSerial()
 	uint64_t startTimeOut = millis();
 	String receivedData;
 	int msgSize = 0;
-	// Read RX buffer to String
+	/** Read RX buffer to String */
 	while (SerialBT.available() != 0)
 	{
 		receivedData += (char)SerialBT.read();
 		msgSize++;
-		// Check for timeout condition
+		/** Check for timeout condition */
 		if ((millis() - startTimeOut) >= 5000)
 			break;
 	}
 	SerialBT.flush();
 	Serial.println("Received message " + receivedData + " over Bluetooth");
 
-	// Decode the message
+	/** Decode the message from BT */
 	int keyIndex = 0;
 	for (int index = 0; index < receivedData.length(); index++)
 	{
@@ -151,7 +177,7 @@ void readBTSerial()
 
 	Serial.println("Received message " + receivedData + " over Bluetooth");
 
-	// Json object for incoming data
+	/** Dump incoming data into Json object */
 	auto error = deserializeJson(jsonBuffer, receivedData);
 	if (!error)
 	{
@@ -165,6 +191,7 @@ void readBTSerial()
 			ssidSec = jsonBuffer["ssidSec"].as<String>();
 			pwSec = jsonBuffer["pwSec"].as<String>();
 
+			/** Create preferences object to save credentials after shutdown */
 			Preferences preferences;
 			preferences.begin("WiFiCred", false);
 			preferences.putString("ssidPrim", ssidPrim);
@@ -180,8 +207,9 @@ void readBTSerial()
 			connStatusChanged = true;
 			hasCredentials = true;
 		}
+		/** If app send erase order, delete credentials */
 		else if (jsonBuffer.containsKey("erase"))
-		{ // {"erase":"true"}
+		{ /** {"erase":"true"} */
 			Serial.println("Received erase command");
 			Preferences preferences;
 			preferences.begin("WiFiCred", false);
@@ -200,22 +228,23 @@ void readBTSerial()
 			err = nvs_flash_erase();
 			Serial.println("nvs_flash_erase: " + err);
 		}
+		/** If app send read order, consult credentials and send to BT */
 		else if (jsonBuffer.containsKey("read"))
-		{ // {"read":"true"}
+		{ /** {"read":"true"} */
 			Serial.println("BTSerial read request");
 			String wifiCredentials;
 			jsonBuffer.clear();
 
-			// Json object for outgoing data
+			/** JSON object for output data */
 			jsonBuffer.clear();
 			jsonBuffer["ssidPrim"] = ssidPrim;
 			jsonBuffer["pwPrim"] = pwPrim;
 			jsonBuffer["ssidSec"] = ssidSec;
 			jsonBuffer["pwSec"] = pwSec;
-			// Convert JSON object into a string
+			/** Convert JSON object to string */
 			serializeJson(jsonBuffer, wifiCredentials);
 
-			// Encode the data
+			/** Encrypt data before BT send */
 			int keyIndex = 0;
 			Serial.println("Stored settings: " + wifiCredentials);
 			for (int index = 0; index < wifiCredentials.length(); index++)
@@ -225,15 +254,16 @@ void readBTSerial()
 				if (keyIndex >= strlen(apName))
 					keyIndex = 0;
 			}
+			/** Print data to BT */
+			delay(2000);
 			Serial.println("Stored encrypted: " + wifiCredentials);
 			SerialBT.print(wifiCredentials);
-
-			delay(2000);
 			SerialBT.print("This is your IP\n");
-			SerialBT.print(deviceIpAdd);
+			SerialBT.print(WiFi.localIP());
 
 			SerialBT.flush();
 		}
+		/** If app send reset order, ESP will be reset */
 		else if (jsonBuffer.containsKey("reset"))
 		{
 			WiFi.disconnect();
@@ -247,33 +277,35 @@ void readBTSerial()
 	jsonBuffer.clear();
 }
 
-// Callback for receiving IP address from AP
+// =========== Callback's =========== //
+
+/** Callback for receiving IP address from AP */
 void gotIP(system_event_id_t event)
 {
 	isConnected = true;
 	connStatusChanged = true;
 }
 
-// Callback for connection loss 
+/** Callback for connection loss */
 void lostCon(system_event_id_t event)
 {
 	isConnected = false;
 	connStatusChanged = true;
 }
 
-// Callback for connection loss
+/** Callback for connection loss */
 void gotCon(system_event_id_t event)
 {
 	Serial.println("Connection established, waiting for IP");
 }
 
-// Callback for Station mode start 
+/** Callback for Station mode start */
 void staStart(system_event_id_t event)
 {
 	Serial.println("Station mode start");
 }
 
-// Callback for Station mode stop 
+/** Callback for Station mode stop */
 void staStop(system_event_id_t event)
 {
 	Serial.println("Station mode stop");
@@ -290,11 +322,11 @@ void staStop(system_event_id_t event)
 */
 bool scanWiFi()
 {
-	// RSSI for primary network 
+	/** RSSI for primary network */
 	int8_t rssiPrim = -1;
-	// RSSI for secondary network 
+	/** RSSI for secondary network */
 	int8_t rssiSec = -1;
-	// Result of this function 
+	/** Result of this function */
 	bool result = false;
 
 	Serial.println("Start scanning for networks");
@@ -303,11 +335,11 @@ bool scanWiFi()
 	WiFi.enableSTA(true);
 	WiFi.mode(WIFI_STA);
 
-	// Scan for AP
+	/** Scan for AP */
 	int apNum = WiFi.scanNetworks(false, true, false, 1000);
 	if (apNum == 0)
 	{
-		Serial.println("Found no networks?????");
+		Serial.println("No networks found");
 		return false;
 	}
 
@@ -353,11 +385,13 @@ bool scanWiFi()
 		Serial.printf("RSSI Prim: %d Sec: %d\n", rssiPrim, rssiSec);
 		if (rssiPrim > rssiSec)
 		{
-			usePrimAP = true; // RSSI of primary network is better
+			/** RSSI of primary network is better */
+			usePrimAP = true;
 		}
 		else
 		{
-			usePrimAP = false; // RSSI of secondary network is better
+			/** RSSI of secondary network is better */
+			usePrimAP = false;
 		}
 		result = true;
 		break;
@@ -365,20 +399,18 @@ bool scanWiFi()
 	return result;
 }
 
-/**
- * Start connection to AP
- */
+/** Start connection to AP */
 void connectWiFi()
 {
-	// Setup callback function for successful connection
+	/** Setup callback function for successful connection */
 	WiFi.onEvent(gotIP, SYSTEM_EVENT_STA_GOT_IP);
-	// Setup callback function for lost connection
+	/** Setup callback function for lost connection */
 	WiFi.onEvent(lostCon, SYSTEM_EVENT_STA_DISCONNECTED);
-	// Setup callback function for connection established
+	/** Setup callback function for lost connection */
 	WiFi.onEvent(gotCon, SYSTEM_EVENT_STA_CONNECTED);
-	// Setup callback function for connection established
+	/** Setup callback function for connection established */
 	WiFi.onEvent(staStart, SYSTEM_EVENT_STA_START);
-	// Setup callback function for connection established
+	/** Setup callback function for connection established */
 	WiFi.onEvent(staStop, SYSTEM_EVENT_STA_STOP);
 
 	WiFi.disconnect(true);
@@ -399,9 +431,7 @@ void connectWiFi()
 	}
 }
 
-/**
- * Set the config to camera pins
- */
+/** Set the config to camera pins */
 void configInitCamera()
 {
 	config.ledc_channel = LEDC_CHANNEL_0;
@@ -423,14 +453,18 @@ void configInitCamera()
 	config.pin_pwdn = PWDN_GPIO_NUM;
 	config.pin_reset = RESET_GPIO_NUM;
 	config.xclk_freq_hz = 20000000;
-	config.pixel_format = PIXFORMAT_JPEG; //YUV422,GRAYSCALE,RGB565,JPEG
+	/** YUV422,GRAYSCALE,RGB565,JPEG */
+	config.pixel_format = PIXFORMAT_JPEG;
 
-	// Select lower framesize if the camera doesn't support PSRAM
-	config.frame_size = FRAMESIZE_UXGA; // FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
-	config.jpeg_quality = 10;			//10-63 lower number means higher quality
+	/** Select lower framesize if the camera doesn't support PSRAM 
+	 *  FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+	 * 10-63 lower number means higher quality
+	*/
+	config.frame_size = FRAMESIZE_UXGA;
+	config.jpeg_quality = 10;
 	config.fb_count = 2;
 
-	// Initialize the Camera
+	/** Initialize the Camera */
 	esp_err_t err = esp_camera_init(&config);
 	if (err != ESP_OK)
 	{
@@ -463,14 +497,51 @@ void configInitCamera()
 	s->set_colorbar(s, 0);					 // 0 = disable , 1 = enable
 }
 
-/**
- * Send photo to the IP Server
- */
+/** Http request to delete JSON trigger in server side */
+void requestDelete()
+{
+	String url = "http://pinware.tech/host_files-main/json/delete.php";
+
+	String json;
+	StaticJsonDocument<200> doc;
+	doc["esp"] = String(apName);
+
+	serializeJson(doc, json);
+
+	if (http.begin(client, url)) // Start request
+	{
+		Serial.print("[HTTP] POST... JSON DELETE\n");
+		int httpCode = http.POST(json); // http request
+		if (httpCode > 0)
+		{
+			Serial.printf("[HTTP] POST... code: %d\n", httpCode);
+			if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
+			{
+				String payload = http.getString(); // Get response
+				Serial.println(payload);		   // Show response in serial port
+			}
+		}
+		else
+		{
+			Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpCode).c_str());
+		}
+		http.end();
+	}
+	else
+	{
+		Serial.printf("[HTTP} Unable to connect JSON DELETE\n");
+	}
+	delay(1000);
+}
+
+/** Send photo to the cloud server */
 String sendPhoto()
 {
+	/** var to catch server response */
 	String getAll;
 	String getBody;
 
+	/** take photo */
 	camera_fb_t *fb = NULL;
 	fb = esp_camera_fb_get();
 	if (!fb)
@@ -478,14 +549,17 @@ String sendPhoto()
 		Serial.println("Camera capture failed");
 	}
 
+	/** Start http request to host server */
 	Serial.println("Connecting to server: " + serverName);
 
 	if (client.connect(serverName.c_str(), serverPort))
 	{
 		Serial.println("Connection successful!");
-		String head = "--FaisanSMARTMirror\r\nContent-Disposition: form-data; name=\"imageFile\"; filename=\"" + deviceIpAdd + ".jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
+		/** Header and tail for http POST request */
+		String head = "--FaisanSMARTMirror\r\nContent-Disposition: form-data; name=\"imageFile\"; filename=\"" + String(apName) + ".jpg\"\r\nContent-Type: image/jpeg\r\n\r\n";
 		String tail = "\r\n--FaisanSMARTMirror--\r\n";
 
+		/** Get length of data */
 		uint32_t imageLen = fb->len;
 		uint32_t extraLen = head.length() + tail.length();
 		uint32_t totalLen = imageLen + extraLen;
@@ -497,6 +571,7 @@ String sendPhoto()
 		client.println();
 		client.print(head);
 
+		/** send data (photo) to server */
 		uint8_t *fbBuf = fb->buf;
 		size_t fbLen = fb->len;
 		for (size_t n = 0; n < fbLen; n = n + 1024)
@@ -516,6 +591,7 @@ String sendPhoto()
 
 		esp_camera_fb_return(fb);
 
+		/** Timer to get server response body */
 		int timoutTimer = 10000;
 		long startTimer = millis();
 		boolean state = false;
@@ -560,24 +636,71 @@ String sendPhoto()
 		Serial.println(getBody);
 	}
 	return getBody;
+	
 }
+
+/** Asking server for photo trigger */
+void requestJSON()
+{
+	String url = "http://pinware.tech/host_files-main/json/" + String(apName) + ".json";
+
+	/** Start request */
+	if (http.begin(client, url))
+	{
+		Serial.print("[HTTP] GET...\n");
+		/** http request */
+		int httpCode = http.GET();
+		if (httpCode > 0)
+		{
+			Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+			if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
+			{
+				/** Get response */
+				String payload = http.getString();
+				/** Show response in serial port */
+				Serial.println(payload);
+
+				if (httpCode == 200)
+				{
+					/** Call for send photo if servers response is OK */
+					sendPhoto();
+					requestDelete();
+				}
+			}
+		}
+		else
+		{
+			Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+		}
+		http.end();
+	}
+	else
+	{
+		Serial.printf("[HTTP} Unable to connect \n");
+	}
+	delay(100);
+}
+
+// ============================================ //
+// ============= Arduino Functions ============ //
+// ============================================ //
 
 void setup()
 {
-	// Disable brownout detector
+	/** Disable brownout detector */
 	WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
-	// Open camera config
+	/** Open camera config */
 	configInitCamera();
-	// Create unique device name
+	/** Create unique device name */
 	createName();
 
-	// Initialize Serial port
+	/** Initialize Serial port */
 	Serial.begin(115200);
-	// Send some device info
+	/** Send device info */
 	Serial.print("Build: ");
 	Serial.println(compileDate);
 
-	// Store WiFi credencials for restart
+	/** Check for WiFi credencials*/
 	Preferences preferences;
 	preferences.begin("WiFiCred", false);
 	bool hasPref = preferences.getBool("valid", false);
@@ -606,19 +729,19 @@ void setup()
 	}
 	preferences.end();
 
-	// Start BTSerial
+	/** Start BTSerial */
 	initBTSerial();
 
 	if (hasCredentials)
 	{
-		// Check for available AP's
+		/** Check for available AP's */
 		if (!scanWiFi())
 		{
 			Serial.println("Could not find any AP");
 		}
 		else
 		{
-			// If AP was found, start connection
+			/** If AP was found, start connection */
 			connectWiFi();
 		}
 	}
@@ -626,6 +749,7 @@ void setup()
 
 void loop()
 {
+	/** Check for connection status */
 	if (connStatusChanged)
 	{
 		if (isConnected)
@@ -636,20 +760,21 @@ void loop()
 			Serial.print(WiFi.localIP());
 			Serial.print(" RSSI: ");
 			Serial.println(WiFi.RSSI());
-			deviceIpAdd = WiFi.localIP().toString();
 		}
 		else
 		{
 			if (hasCredentials)
 			{
 				Serial.println("Lost WiFi connection");
-				// Received WiFi credentials
+				/** Received WiFi credentials */
 				if (!scanWiFi())
-				{ // Check for available AP's
+				{
+					/** Check for available AP's */
 					Serial.println("Could not find any AP");
 				}
 				else
-				{ // If AP was found, start connection
+				{
+					/** If AP was found, start connection */
 					connectWiFi();
 				}
 			}
@@ -657,18 +782,14 @@ void loop()
 		connStatusChanged = false;
 	}
 
-	// Check if Data over SerialBT has arrived
+	/** Check if Data over SerialBT has arrived */
 	if (SerialBT.available() != 0)
 	{
-		// Get and parse received data
+		/** Get and parse received data */
 		readBTSerial();
 	}
 
-	// Send photo time lapse
-	unsigned long currentMillis = millis();
-	if (currentMillis - previousMillis >= timerInterval)
-	{
-		sendPhoto();
-		previousMillis = currentMillis;
-	}
+	/** Request to server JSON trigger */
+	requestJSON();
+	delay(1000);
 }
